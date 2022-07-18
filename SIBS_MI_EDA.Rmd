@@ -1,0 +1,272 @@
+---
+title: "Exploratory Data Analysis"
+author: "Carson Slater"
+date: '2022-07-14'
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	warning = FALSE
+)
+```
+
+```{r, include=FALSE}
+library(tidymodels)
+library(mice)
+library(VIM)
+library(knitr)
+library(readr)
+library(fastDummies)
+```
+
+```{r, include=FALSE}
+# Import Data
+# Added variables created by Owen Wagner (Total_NSIDS, Complications)
+
+urlfile = "https://raw.githubusercontent.com/carsonslater/sibs_summer2022/Main/Myocardial_infarction_complications_Database2.csv"
+
+mi_2 <- read.csv(url(urlfile))
+```
+
+```{r, include=FALSE}
+# Cleaning the Data
+colMeans(is.na(mi_2)) %>% kable()
+
+# Choosing to remove columns with greater than 40% of the data missing
+mi_2 <- mi_2 %>% select(-ID, -IBS_NASL, -S_AD_KBRIG, -D_AD_KBRIG, -KFK_BLOOD)
+```
+
+# An Attempt to Impute the Data with KNN
+```{r, eval=FALSE, include=FALSE}
+mi_kNN <- kNN(mi_2, k = 5, variable = colnames(mi_2), catFun = maxCat, impNA = TRUE, imp_var = FALSE)
+```
+
+## Imputing the Data Using Multiple Imputation Through Mice
+```{r, eval=FALSE}
+formulas <- make.formulas(mi_2)
+
+method <- make.method(mi_2)
+
+mi_multiple_imp <- parlmice(mi_2,
+  method = method,
+  formulas = formulas,
+  m = 20,
+  n.core = 3,
+  cluster.seed = 12,
+  n.imp.core = 2,
+  cl.type = "FORK")
+
+# plot(mi_multiple_imp)
+# mi_2.5 returns all of the datasets imputed from the parlmice function
+#mi_2.5 <- complete(mi_multiple_imp, action = "long", include = TRUE) 
+mi_3 <- complete(mi_multiple_imp, action = 1, include = FALSE) 
+
+# Making sure that the multiple imputation filled in all missing data
+#colMeans(is.na(mi_3)) %>% kable()
+```
+
+
+## Creating Dummy Variables for Modeling
+```{r}
+# Creating dummy variables for all of the categorical covariates
+mi_4 <- mi_3 %>% dummy_cols(select_columns = c("INF_ANAM","STENOK_AN","FK_STENOK",
+                                               "IBS_POST","GB","DLIT_AG","ZSN_A",
+                                               "ant_im","lat_im","inf_im","post_im",
+                                               "TIME_B_S","R_AB_1_n","R_AB_2_n",
+                                               "R_AB_3_n","NA_R_1_n","NA_R_2_n",
+                                               "NA_R_3_n", "NOT_NA_1_n","NOT_NA_2_n",
+                                               "NOT_NA_3_n", "LET_IS"))
+# Filtering out all of the original categorical variables and the complications not of interest
+mi_4 <- mi_4 %>% select(-INF_ANAM, -STENOK_AN, -FK_STENOK, -IBS_POST, -GB, -DLIT_AG , -ZSN_A,
+                        -ant_im, -lat_im, -inf_im , -post_im, -TIME_B_S, -R_AB_1_n, -R_AB_2_n,                         -R_AB_3_n, -NA_R_1_n, -NA_R_2_n, -NA_R_3_n, -NOT_NA_1_n, -NOT_NA_2_n,
+                        -NOT_NA_3_n, -FIBR_PREDS, -PREDS_TAH, -JELUD_TAH, -FIBR_JELUD,
+                        -A_V_BLOK, -OTEK_LANC, -RAZRIV, -DRESSLER, -ZSN, -P_IM_STEN,
+                        -Complication, -LET_IS) %>% mutate(REC_IM = as.factor(REC_IM))
+
+
+```
+
+```{r, include=FALSE, eval=FALSE}
+# Citing the MI method
+# "Chan, G. and StatsNotebook Team (2020). StatsNotebook. (Version 0.1.0) [Computer Software]. Retrieved from https://www.statsnotebook.io"
+# "R Core Team (2020). The R Project for Statistical Computing. [Computer software]. Retrieved from https://r-project.org"
+# "Buuren, S. v. and K. Groothuis-Oudshoorn (2010). mice: Multivariate imputation by chained equations in R. Journal of Statistical Software: 1-68."
+```
+
+```{r, eval=FALSE}
+save.image("mi_mult_imp.RData")
+```
+
+# EDA
+```{r}
+plot(mi_multiple_imp)
+```
+
+```{r, include=FALSE}
+load("mi_mult_imp.RData")
+```
+
+## Building Models
+
+### Split the Data
+```{r, include=FALSE, eval=FALSE}
+set.seed(146)
+
+# Split the data for Tidymodels
+mi_split <- initial_split(mi_4, 
+                          prop = 0.75)
+mi_train <- training(mi_split)
+mi_test <- testing(mi_split)
+
+# For glmnet
+yTrain <- mi_train$REC_IM %>% as.vector()
+x_df_train <- mi_train %>% select(-REC_IM)
+xTrain <- as.matrix(x_df_train)
+
+yTest <-  mi_test$REC_IM %>% as.vector()
+x_df_test <- mi_test %>% select(-REC_IM)
+xTest <- as.matrix(x_df_test)
+# Make Cross Validation Folds
+mi_folds <- vfold_cv(mi_train, v = 10)
+```
+
+```{r, eval=FALSE}
+lr_mod_tm <- logistic_reg(
+  engine = "glmnet",
+  penalty = tune(),
+  mixture = 1
+)
+
+lr_reg_grid <- expand_grid(grid_regular(penalty(), levels = 20))
+
+lr_rec_tm <- recipe(REC_IM ~ ., data = mi_4)
+
+prep(lr_rec_tm)
+
+lr_wkflow_tm <- workflow() %>% 
+  add_recipe(lr_rec_tm) %>% 
+  add_model(lr_mod_tm)
+
+lr_res <- 
+  lr_wkflow_tm %>% 
+  tune_grid(mi_folds,
+            grid = lr_reg_grid,
+            control = control_grid(save_pred = TRUE),
+            metrics = metric_set(roc_auc))
+
+lr_plot <- 
+  lr_res %>% 
+  collect_metrics() %>% 
+  ggplot(aes(x = penalty, y = mean)) + 
+  geom_point() + 
+  geom_line() + 
+  ylab("Area under the ROC Curve") +
+  scale_x_log10(labels = scales::label_number())
+
+lr_plot
+
+top_models <-
+  lr_res %>% 
+  show_best("roc_auc", n = 15) %>% 
+  arrange(penalty) 
+top_models
+
+lr_best <- 
+  lr_res %>% 
+  collect_metrics() %>% 
+  arrange(penalty) %>% 
+  slice_max(mean)
+lr_best
+
+lr_auc <- 
+  lr_res %>% 
+  collect_predictions(parameters = lr_best) %>% 
+  roc_curve(REC_IM, .pred_0) %>% 
+  mutate(model = "Logistic Regression")
+
+autoplot(lr_auc)
+
+lr_best
+```
+
+### Fitting the Logistic Regression Model with Tidymodels
+```{r, eval=FALSE}
+lr_fit_tm <- fit(lr_wkflow_tm, data = mi_train)
+```
+
+### Evaluating the Logistic Regression Model with Tidymodels
+```{r, eval=FALSE}
+# Augmented model
+model_aug_tm <- augment(lr_fit_tm, truth = REC_IM, 
+                     new_data = mi_test)
+# roc score
+auc_score_tm <- roc_auc(data = model_aug_tm, truth = Complication, 
+                     estimate = .pred_1, event_level = "second")
+# plot of roc curve
+autoplot(roc_curve(data = model_aug, truth = Complication,
+                   estimate = .pred_1, event_level = "second"))
+```
+```{r, eval=FALSE, include=FALSE}
+save.image("SIBS_log_reg.Rdata")
+```
+
+### Creating a Model with Forward Selection
+```{r}
+library(readr)
+library(olsrr)
+urlfile="https://raw.githubusercontent.com/carsonslater/sibs_summer2022/Main/mi_KNN_imputation.csv"
+
+mi_4$REC_IM <- as.factor(mi_4$REC_IM)
+
+#df<-read_csv(url(urlfile))
+
+#head(df)
+
+#sub1 <- df[,c(1:75,117)]
+
+#define intercept-only model
+intercept_only <- glm(mi_4$REC_IM ~ 1, data=mi_4, family = "binomial")
+
+#define model with all predictors
+all <- glm(mi_4$REC_IM ~ ., data=mi_4, family = "binomial")
+
+tidy(all) %>% kable()
+
+#perform forward stepwise regression
+forward <- step(intercept_only, direction='both', scope=formula(all), trace=0)
+
+summary(forward)
+
+forward$anova
+
+#view final model
+forward$coefficients
+```
+
+### Creating the Logistic Regression Model Using `glmnet` -- DID NOT WORK
+
+```{r}
+ybTrain <- as.factor(yTrain == 1)
+ybTest <- as.factor(yTest == 1)
+table(ybTrain); table(ybTest)
+```
+
+```{r}
+cv.lasso.b <- glmnet(xTrain, ybTrain, alpha=1, standardize=FALSE, family="binomial", nfolds=10, lambda = c(0.00785, 0.0885))
+
+#plot(cv.lasso.b)
+
+cv.lasso.b$lambda.min
+cv.lasso.b$lambda.1se
+
+lasso.b.coef <- coef(cv.lasso.b, s=cv.lasso.b$lambda.1se)
+exp(lasso.b.coef)  #estimated odds ratios
+
+tidy(lasso.b.coef)
+```
+
